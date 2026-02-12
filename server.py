@@ -167,7 +167,13 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
             file_size = os.path.getsize(path)
             print(f"📥 Download: {os.path.basename(path)} ({format_size(file_size)}) da {self.client_address[0]}")
             self.path = self.path.replace("\\", "/")
-            super().do_GET()
+            try:
+                super().do_GET()
+            except (BrokenPipeError, ConnectionResetError):
+                # Client ha interrotto il download (normale con file grandi su mobile)
+                pass
+            except Exception as e:
+                print(f"⚠️  Errore durante download: {type(e).__name__}: {e}")
         else:
             self.send_error(404, "Not found")
 
