@@ -32,6 +32,18 @@ if not ROOT_DIRECTORY:
 LOCAL_IP   = get_local_ip()
 SERVER_URL = f"http://{LOCAL_IP}:{PORT}"
 
+# Sicurezza: Rate limiting + Validazione file
+FAILED_ATTEMPTS = {}  # {ip: [timestamp, ...]}
+ALLOWED_EXTENSIONS = {
+    '.txt', '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp',
+    '.mp3', '.mp4', '.avi', '.mov', '.mkv', '.flv',
+    '.zip', '.tar', '.gz', '.rar', '.7z',
+    '.py', '.js', '.json', '.xml', '.html', '.css', '.cpp', '.java', '.c', '.h'
+}
+MAX_ATTEMPTS = 5
+ATTEMPT_WINDOW = 900  # 15 minuti in secondi
+
 ###############################################################################
 # SERVER MULTITHREAD
 ###############################################################################
@@ -46,18 +58,56 @@ class ThreadingHTTPServer(ThreadingMixIn, socketserver.TCPServer):
 
 class AuthHandler(http.server.SimpleHTTPRequestHandler):
 
-    # ------- helper autenticazione -----------------------------------------
+    # ------- helper autenticazione con rate limiting ----------------------
+    def _check_rate_limit(self):
+        """Controlla rate limiting per autenticazione fallita (5 tentativi / 15 min)"""
+        ip = self.client_address[0]
+        now = time.time()
+        
+        if ip not in FAILED_ATTEMPTS:
+            FAILED_ATTEMPTS[ip] = []
+        
+        # Rimuovi tentativi oltre la finestra
+        FAILED_ATTEMPTS[ip] = [ts for ts in FAILED_ATTEMPTS[ip] if now - ts < ATTEMPT_WINDOW]
+        
+        # Se troppi tentativi, blocca
+        if len(FAILED_ATTEMPTS[ip]) >= MAX_ATTEMPTS:
+            return False, f"🚫 Troppi tentativi falliti da {ip}. Riprova tra 15 minuti."
+        return True, ""
+    
     def _ok_auth(self) -> bool:
         h = self.headers.get("Authorization", "")
         if not h.startswith("Basic "):
             return False
         try:
             user, pwd = base64.b64decode(h[6:]).decode().split(":", 1)
-            return user == USERNAME and pwd == PASSWORD
+            auth_ok = user == USERNAME and pwd == PASSWORD
+            
+            if not auth_ok:
+                # Incrementa contatore fallimenti
+                ip = self.client_address[0]
+                FAILED_ATTEMPTS[ip].append(time.time())
+                print(f"⚠️  Auth fallita da {ip} ({len(FAILED_ATTEMPTS[ip])}/{MAX_ATTEMPTS} tentativi)")
+            else:
+                # Pulisci i tentativi falliti se auth riuscita
+                ip = self.client_address[0]
+                if ip in FAILED_ATTEMPTS:
+                    FAILED_ATTEMPTS[ip] = []
+            
+            return auth_ok
         except Exception:
             return False
 
     def _auth_required(self):
+        # Controlla rate limiting
+        rate_ok, rate_msg = self._check_rate_limit()
+        if not rate_ok:
+            self.send_response(429)  # Too Many Requests
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(f"<html><body><h2>{rate_msg}</h2></body></html>".encode())
+            return
+        
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="File Server"')
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -125,6 +175,15 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         if not self._ok_auth():
             self._auth_required(); return
+        
+        # Controlla rate limiting anche durante upload
+        rate_ok, rate_msg = self._check_rate_limit()
+        if not rate_ok:
+            self.send_response(429)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(f"<html><body><h2>{rate_msg}</h2></body></html>".encode())
+            return
 
         # Special handler: change served root directory at runtime
         if self.path.rstrip('/') == '/set_root':
@@ -195,6 +254,19 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
             self._err("Campo file mancante"); return
         filename = disp.split("filename=")[-1].strip('"')
         filename = os.path.basename(unquote(filename))
+        
+        # ✅ Validazione tipo file: whitelist estensioni
+        _, ext = os.path.splitext(filename)
+        ext_lower = ext.lower()
+        if ext_lower not in ALLOWED_EXTENSIONS:
+            blocked_msg = f"🚫 Tipo file non consentito: {ext}<br>Estensioni consentite: {', '.join(sorted(list(ALLOWED_EXTENSIONS)[:15]))}..."
+            print(f"⚠️  Upload bloccato da {self.client_address[0]}: {filename} ({ext_lower})")
+            self.send_response(400)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(f"<html><body><h2>{blocked_msg}</h2><a href='javascript:history.back()'>Indietro</a></body></html>".encode())
+            return
+        
         dpath    = os.path.join(ddir, filename)
 
         # 3. copia dati fino al prossimo boundary
