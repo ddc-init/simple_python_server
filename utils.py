@@ -4,6 +4,7 @@ import fnmatch
 import qrcode
 from urllib.parse import unquote, quote
 import datetime
+import platform
 
 def format_size(size_bytes: int) -> str:
     """
@@ -31,12 +32,27 @@ def get_creation_time(path: str) -> str:
 
 def find_directory(directory_name):
     """
-    Search for the given directory name starting from C:\\.
+    Search for the given directory name starting from the appropriate root:
+    - Windows: C:\\
+    - macOS: /Users
+    - Linux: /
     If found, returns the absolute path to that directory.
     Otherwise, returns None.
     """
     print(f"🔍 Searching for directory: {directory_name}...")
-    for root, dirs, _ in os.walk("C:\\"):
+    
+    # Determine the starting path based on the OS
+    system = platform.system()
+    if system == "Windows":
+        start_path = "C:\\"
+    elif system == "Darwin":  # macOS
+        start_path = "/Users"
+    else:  # Linux and others
+        start_path = "/"
+    
+    print(f"   (Searching from {start_path} on {system})")
+    
+    for root, dirs, _ in os.walk(start_path):
         if fnmatch.filter(dirs, os.path.basename(directory_name)):
             found_path = os.path.join(root, os.path.basename(directory_name))
             print(f"✅ Found directory: {found_path}")

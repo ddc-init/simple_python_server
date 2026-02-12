@@ -3,7 +3,7 @@
 
 import http.server, socketserver, base64, os, yaml, time
 from socketserver import ThreadingMixIn
-from urllib.parse import unquote, quote
+from urllib.parse import unquote, quote, parse_qs
 from utils import (find_directory, get_local_ip, generate_qr_code, get_file_icon,
                    identify_device, format_size, get_creation_time)
 
@@ -100,12 +100,22 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(html.encode())
             return
 
-        sub  = unquote(self.path.lstrip("/")).replace("\\", "/")
+        # Extract path and sorting parameters
+        path_and_query = self.path.split('?', 1)
+        req_path = path_and_query[0]
+        query_params = parse_qs(path_and_query[1]) if len(path_and_query) > 1 else {}
+        sort_by = query_params.get('sort', ['name'])[0]  # 'name' or 'size'
+        sort_dir = query_params.get('dir', ['asc'])[0]   # 'asc' or 'desc'
+
+        sub  = unquote(req_path.lstrip("/")).replace("\\", "/")
         path = os.path.join(ROOT_DIRECTORY, sub)
 
         if os.path.isdir(path):
-            self._show_dir(path, self.path)
+            self._show_dir(path, req_path, sort_by, sort_dir)
         elif os.path.isfile(path):
+            # Log del download
+            file_size = os.path.getsize(path)
+            print(f"📥 Download: {os.path.basename(path)} ({format_size(file_size)}) da {self.client_address[0]}")
             self.path = self.path.replace("\\", "/")
             super().do_GET()
         else:
@@ -200,7 +210,9 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
                 out.write(prev)
                 prev = curr
 
-        print(f"✅  Upload completato → {dpath}")
+        # Log dell'upload con dettagli
+        file_size = os.path.getsize(dpath)
+        print(f"📤 Upload: {filename} ({format_size(file_size)}) da {self.client_address[0]} → {dpath}")
 
         self.send_response(201)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -211,13 +223,28 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
         ).encode())
 
     # ------- directory listing + frontend ----------------------------------
-    def _show_dir(self, local: str, req: str):
+    def _show_dir(self, local: str, req: str, sort_by: str = 'name', sort_dir: str = 'asc'):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
 
         up = os.path.dirname(req.rstrip("/"))
         backlink = "" if up == "" else f"<a href='{up}'>[Go&nbsp;up]</a>"
+
+        # Build sort buttons
+        sort_buttons = f"""
+        <div style="margin: 20px 0; padding: 10px; background: #f5f5f5; border-radius: 5px;">
+            <strong>Ordina per:</strong>
+            <a href='{req}?sort=name&dir=asc' style="padding: 5px 10px; margin: 0 5px; background: {'#007bff' if sort_by=='name' and sort_dir=='asc' else '#ccc'}; color: white; text-decoration: none; border-radius: 3px;">📝 Nome (A→Z)</a>
+            <a href='{req}?sort=name&dir=desc' style="padding: 5px 10px; margin: 0 5px; background: {'#007bff' if sort_by=='name' and sort_dir=='desc' else '#ccc'}; color: white; text-decoration: none; border-radius: 3px;">📝 Nome (Z→A)</a>
+            <a href='{req}?sort=size&dir=asc' style="padding: 5px 10px; margin: 0 5px; background: {'#007bff' if sort_by=='size' and sort_dir=='asc' else '#ccc'}; color: white; text-decoration: none; border-radius: 3px;">📊 Dimensione (min→max)</a>
+            <a href='{req}?sort=size&dir=desc' style="padding: 5px 10px; margin: 0 5px; background: {'#007bff' if sort_by=='size' and sort_dir=='desc' else '#ccc'}; color: white; text-decoration: none; border-radius: 3px;">📊 Dimensione (max→min)</a>
+            <a href='{req}?sort=format&dir=asc' style="padding: 5px 10px; margin: 0 5px; background: {'#007bff' if sort_by=='format' and sort_dir=='asc' else '#ccc'}; color: white; text-decoration: none; border-radius: 3px;">📄 Formato (A→Z)</a>
+            <a href='{req}?sort=format&dir=desc' style="padding: 5px 10px; margin: 0 5px; background: {'#007bff' if sort_by=='format' and sort_dir=='desc' else '#ccc'}; color: white; text-decoration: none; border-radius: 3px;">📄 Formato (Z→A)</a>
+            <a href='{req}?sort=date&dir=asc' style="padding: 5px 10px; margin: 0 5px; background: {'#007bff' if sort_by=='date' and sort_dir=='asc' else '#ccc'}; color: white; text-decoration: none; border-radius: 3px;">📅 Data (vecchi→nuovi)</a>
+            <a href='{req}?sort=date&dir=desc' style="padding: 5px 10px; margin: 0 5px; background: {'#007bff' if sort_by=='date' and sort_dir=='desc' else '#ccc'}; color: white; text-decoration: none; border-radius: 3px;">📅 Data (nuovi→vecchi)</a>
+        </div>
+        """
 
         html = f"""
         <html><head><meta charset="utf-8"><title>{req}</title>
@@ -288,11 +315,50 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
         }});
         </script>
 
+        <hr>
+        {sort_buttons}
         <hr><h3>Contents</h3><ul>
         """
 
         try:
-            for item in sorted(os.listdir(local)):
+            items = os.listdir(local)
+            
+            # Sort items based on parameters
+            if sort_by == 'size':
+                # Sort by file size (with name as secondary sort), directories get size 0
+                def get_sort_key(item):
+                    path = os.path.join(local, item)
+                    try:
+                        size = os.path.getsize(path) if os.path.isfile(path) else 0
+                    except:
+                        size = 0
+                    return (size, item)
+                items = sorted(items, key=get_sort_key, reverse=(sort_dir == 'desc'))
+            elif sort_by == 'format':
+                # Sort by file extension/format
+                def get_sort_key(item):
+                    path = os.path.join(local, item)
+                    if os.path.isdir(path):
+                        ext = ''
+                    else:
+                        ext = os.path.splitext(item)[1].lower()
+                    return (ext, item)
+                items = sorted(items, key=get_sort_key, reverse=(sort_dir == 'desc'))
+            elif sort_by == 'date':
+                # Sort by modification date
+                def get_sort_key(item):
+                    path = os.path.join(local, item)
+                    try:
+                        mtime = os.path.getmtime(path)
+                    except:
+                        mtime = 0
+                    return (mtime, item)
+                items = sorted(items, key=get_sort_key, reverse=(sort_dir == 'desc'))
+            else:
+                # Sort by name (default)
+                items = sorted(items, reverse=(sort_dir == 'desc'))
+            
+            for item in items:
                 p = os.path.join(local, item)
                 nxt = (req.strip("/") + "/" + item).lstrip("/")
                 href = "/" + quote(nxt.replace("\\", "/"))
@@ -321,6 +387,44 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
 # AVVIO
 ###############################################################################
 
+# Verifica se la porta è già in uso e prova a liberarla
+import socket
+def check_port_available(port):
+    """Controlla se una porta è disponibile"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1)
+    try:
+        sock.bind(("", port))
+        sock.close()
+        return True
+    except OSError:
+        sock.close()
+        return False
+
+if not check_port_available(PORT):
+    print(f"⚠️  Porta {PORT} già in uso. Cerco di liberarla...")
+    import subprocess
+    try:
+        # Trova e uccidi il processo che usa la porta
+        result = subprocess.run(['lsof', '-ti', f':{PORT}'], 
+                              capture_output=True, text=True, timeout=5)
+        if result.stdout.strip():
+            pids = result.stdout.strip().split('\n')
+            for pid in pids:
+                subprocess.run(['kill', '-9', pid], timeout=5)
+                print(f"   Terminato processo {pid}")
+            time.sleep(1)
+        
+        if not check_port_available(PORT):
+            print(f"❌ Impossibile liberare la porta {PORT}")
+            print(f"   Esegui manualmente: lsof -ti:{PORT} | xargs kill -9")
+            exit(1)
+        else:
+            print(f"✅ Porta {PORT} ora disponibile")
+    except Exception as e:
+        print(f"❌ Errore durante la liberazione della porta: {e}")
+        exit(1)
+
 os.chdir(ROOT_DIRECTORY)
 print(f"✅  URL: http://localhost:{PORT}  ({SERVER_URL})")
 print(f"📂  Path condiviso: {ROOT_DIRECTORY}")
@@ -328,5 +432,11 @@ print(f"🔐  Credenziali: {USERNAME}/{PASSWORD}")
 print(f"⚙️   Cambia path: {SERVER_URL}/set_root")
 print("📸  QR code:"); generate_qr_code(SERVER_URL)
 
-with ThreadingHTTPServer(("", PORT), AuthHandler) as httpd:
-    httpd.serve_forever()
+try:
+    with ThreadingHTTPServer(("", PORT), AuthHandler) as httpd:
+        httpd.serve_forever()
+except KeyboardInterrupt:
+    print("\n\n👋 Server fermato dall'utente")
+except Exception as e:
+    print(f"\n\n❌ Errore del server: {e}")
+    exit(1)

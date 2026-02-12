@@ -1,1 +1,5 @@
 credentials.yaml
+venv/
+test/
+*.pyc
+__pycache__/
