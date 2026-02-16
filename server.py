@@ -345,7 +345,36 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
             }}
             body {{ font-family: sans-serif; padding: 20px; }}
             h2 {{ margin-top: 0; }}
+            a.visited-link {{
+                color: #7030a0 !important;  /* Viola */
+            }}
         </style>
+        <script>
+        // Track visited links during session
+        const VISITED_LINKS_KEY = 'visited_links_' + location.pathname;
+        
+        function initVisitedLinks() {{
+            // Restore visited state from sessionStorage
+            const visited = JSON.parse(sessionStorage.getItem(VISITED_LINKS_KEY) || '[]');
+            document.querySelectorAll('a[data-trackable]').forEach(link => {{
+                if (visited.includes(link.href)) {{
+                    link.classList.add('visited-link');
+                }}
+                
+                // Track click
+                link.addEventListener('click', function() {{
+                    if (!visited.includes(this.href)) {{
+                        visited.push(this.href);
+                    }}
+                    this.classList.add('visited-link');
+                    sessionStorage.setItem(VISITED_LINKS_KEY, JSON.stringify(visited));
+                }});
+            }});
+        }}
+        
+        // Init when page loads
+        document.addEventListener('DOMContentLoaded', initVisitedLinks);
+        </script>
         </head><body>
         <a href="/set_root" class="admin-btn">⚙️ Set Root</a>
         <h2>Directory: {req}</h2>{backlink}<hr>
@@ -441,12 +470,12 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
                 nxt = (req.strip("/") + "/" + item).lstrip("/")
                 href = "/" + quote(nxt.replace("\\", "/"))
                 if os.path.isdir(p):
-                    html += f"<li>📁 <a href='{href}'>{item}</a></li>"
+                    html += f"<li>📁 <a href='{href}' data-trackable>{item}</a></li>"
                 else:
                     icon = get_file_icon(item)
                     size = format_size(os.path.getsize(p))
                     ctim = get_creation_time(p)
-                    html += (f"<li>{icon} <a download href='{href}'>{item}</a> "
+                    html += (f"<li>{icon} <a download href='{href}' data-trackable>{item}</a> "
                              f"<small>({size}, {ctim})</small></li>")
             html += "</ul></body></html>"
         except OSError:
